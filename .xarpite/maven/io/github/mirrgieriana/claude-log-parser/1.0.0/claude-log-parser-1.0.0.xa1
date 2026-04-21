@@ -1,0 +1,72 @@
+
+/** ARRAY<[predicate: Entry -> BOOLEAN; action: Entry -> NULL]> */
+entryRules := []
+
+
+ignoredTypes := [
+  "permission-mode"
+  "file-history-snapshot"
+  "last-prompt"
+  "queue-operation"
+]
+entryRules += [e -> e.type @ ignoredTypes ; e -> NULL]
+
+entryRules += [e -> e.type == "system" && e.subtype == "turn_duration"; e -> NULL]
+entryRules += [e -> e.type == "system" && e.subtype == "local_command"; e -> NULL]
+entryRules += [e -> e.type == "system" && e.subtype == "compact_boundary"; e -> OUT << "Compact: $(e.content)"]
+entryRules += [e -> e.type == "user" && (e.message.content ?= STRING) && /^<(?:)local-command-caveat(?:)>/ @ e.message.content; e -> NULL]
+
+
+ignoredAttachments := [
+  "skill_listing"
+  "hook_success"
+  "deferred_tools_delta"
+  "task_reminder"
+]
+entryRules += [e -> e.type == "attachment" && e.attachment.type @ ignoredAttachments; e -> NULL]
+
+entryRules += [e -> e.type == "attachment" && e.attachment.type == "file"; e -> OUT << "File: $(e.attachment.filename)"]
+
+
+contentRules := []
+contentRules += [c -> c.type == "text"; e, c -> OUT << "$(e.type == "user" ? "User" : "Assistant"): $(c.text)"]
+contentRules += [c -> c.type == "thinking"; e, c -> OUT << "thinking..."]
+contentRules += [c -> c.type == "tool_use"; e, c -> OUT << "$(c.name)($(c.input.$&))"]
+contentRules += [c -> c.type == "tool_result"; e, c -> OUT << "Result: $(c.content)"]
+
+entryRules += [
+  e -> e.type == "user" || e.type == "assistant"
+  e -> :
+    e.message.content ?= STRING ? :
+      (
+        e.message.content =~ /^<bash-input>(.*)<\/bash-input>$/ | m => m && :
+          OUT << "Bash: $(m.1)"
+          return!!
+        e.message.content >> SPLIT["</bash-stdout><bash-stderr>"; 2] >> TO_ARRAY | oo => oo.$# == 2 && :
+          oo.0 =~ /^<bash-stdout>/ && :
+            oo.1 =~ /<\/bash-stderr>$/ && :
+              oo.0::replace(/^<bash-stdout>/; "") | _ && (OUT << "Stdout: $(_)")
+              oo.1::replace(/<\/bash-stderr>$/; "") | _ && (OUT << "Stderr: $(_)")
+              return!!
+        OUT << "$(e.type == "user" ? "User" : "Assistant"): $(e.message.content)"
+      ) !: return
+    : :
+      e.message.content() | c => :
+        (
+          contentRules() | r => r.0(c) && :
+            r.1(e; c)
+            return!!
+          ERR << JSON(c)
+        ) !: return
+]
+
+
+I >> JSONLD | e => :
+  (
+    entryRules() | r => r.0(e) && :
+      r.1(e)
+      return!!
+    ERR << JSON(e)
+  ) !: return
+
+E
